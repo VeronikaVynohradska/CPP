@@ -1,198 +1,133 @@
-'''
-Created on Jan 24, 2018
-
-@author: Eisah
-'''
 from socket import *
-import threading, atexit, time
+import threading
+import os
+import json
+import hashlib
+import time
 
-class Client():
-    
-    def __init__(self, name, conn, addr, room):
-        self._clientName = name
-        self._clientSocket = conn
-        self._clientAddress = addr
-        self._currentRoom = room
-        self._currentRoom.add_client(self)
-        self._exists = True
-        
-        receivingThread = threading.Thread(target = self._receive_from_client)
-        receivingThread.start()
-        
-        
-    def set_room(self, room):
-        if not self._currentRoom == None:
-            self._currentRoom.remove_client(self)
-            
-        if type(room) == int:
-                room = eval("eval('self._currentRoom.get_server().ROOM{}')".format(room))
-        self._currentRoom = room
-        self._currentRoom.add_client(self)
-        
-        
-    def get_name(self):
-        return self._clientName
-    
-    
-    def send_to_client(self, data: str):
-        self._clientSocket.send(data.encode("UTF-8"))
-       
-       
-    def _receive_from_client(self):
-        while self._exists:
-            packet = self._clientSocket.recv(1024).decode("UTF-8")
-            self._parse_packet(packet)
-            
-            
-    def _parse_packet(self, p: str):
-        # Packet Types
-        # Message     -> MessageHeader;MessageContent
-        # Room Change -> RoomHeader;RoomNum
-        # Disconnect  -> DisconnectHeader;
-        parsed = p.split(';')
-        command = parsed[0]
-        if command == '_message':
-            self._currentRoom.send_message(self._clientName, ';'.join(parsed[1:]).rstrip())
-        elif command == 'room':
-            self.set_room(int(parsed[1]))
-        elif command == 'disconnect':
-            if self._exists:
-                self._exists = False
-                self._clientSocket.close()
-                self._currentRoom.remove_client(self)
-                self._currentRoom.get_server().remove_client(self)
-        elif command == 'name':
-            old_name = self._clientName
-            self._clientName = ';'.join(parsed[1:]).rstrip()
-            self._currentRoom.send_update("update;--{} has changed their name to {}--".format(old_name, self._clientName))
-        elif command == "update":
-            self._currentRoom.send_update(';'.join(parsed[1:]).rstrip())
-        elif command == '':
-            if self._exists:
-                self._exists = False
-                self._clientSocket.close()
-                self._currentRoom.remove_client(self)
-                self._currentRoom.get_server().remove_client(self)
-            
-            
-    def _send_confirmation(self, c):
-        self.send_to_client(c)
-            
-       
-      
-        
-class Room():
-    
-    def __init__(self, name, server):
-        self._roomName = name
-        self._server = server
-        self._occupants = []
-        
-        
-    def get_server(self):
-        return self._server   
-    
-    
-    def get_name(self):
-        return self._roomName    
-    
-    
-    def add_client(self, c):
-        self._occupants.append(c)
-        m = "update;" + c._clientName + " has joined the room"
-        time.sleep(1)
-        self.send_update(m)
-        
-        
-    def remove_client(self, c):
-        if c in self._occupants:
-            self._occupants.remove(c)
-        m = "update;" + c._clientName + " has disconnected from the room"
-        self.send_update(m)
-        
-        
-    def send_message(self, sender, _message):
-        packet = "_message;" + sender + ': ' + _message
-        for o in self._occupants:
-            if not o.get_name() == sender:
-                o.send_to_client(packet)
-    
-    
-    def _print_occupants(self):
-        if self._occupants == []:
-            print("Empty")
-            return
-        s = ''
-        for o in self._occupants:
-            s += o.get_name() + ', '
-        print(s[0:-2])
-        
-    def send_update(self, u):
-        for o in self._occupants:
-            o.send_to_client(u)
+clients = {}
+messages = {}
+users = {}
 
+def load_users():
+    global users
+    if os.path.exists("users.json"):
+        with open("users.json", "r") as file:
+            users = json.load(file)
 
+def save_users():
+    with open("users.json", "w") as file:
+        json.dump(users, file)
 
-class MultiChatServer():
-    
-    def __init__(self, maxClients, serverPort):
-        self._maxClients = maxClients
-        self._clients = []
-        
-        self.ROOM1 = Room('1', self)
-        self.ROOM2 = Room('2', self)
-        self.ROOM3 = Room('3', self)
-        self.ROOM4 = Room('4', self)
-        
-        self._serverSocket = socket(AF_INET, SOCK_STREAM)
-        self._serverPort = serverPort
-    
-    def print_room_clients(self):
-        for r in [self.ROOM1, self.ROOM2, self.ROOM3, self.ROOM4]:
-            print (r.get_name(), r._occupants)
-        
-    def start(self):
-        self._serverSocket.bind(('',self._serverPort))
-        self._serverSocket.listen(16)
-        print("Server is listening on port", self._serverPort)
-        listeningThread = threading.Thread(target = self._acceptConnections)
-        listeningThread.start()
-    
-        
-    def end(self):
+def load_messages():
+    global messages
+    if os.path.exists("messages.json"):
+        with open("messages.json", "r") as file:
+            messages = json.load(file)
+
+def save_messages():
+    with open("messages.json", "w") as file:
+        json.dump(messages, file)
+
+def broadcast_user_list():
+    user_list = ",".join(clients.values())
+    for client_socket in clients:
         try:
-            self._serverSocket.close()
+            client_socket.send(f"USERS:{user_list}".encode())
         except:
-            pass
-        
-        
-    def remove_client(self, c):
-        if c in self._clients:
-            self._clients.remove(c)
-        del c
-    
-    
-    def _serverIsFull(self):
-        return self._maxClients == len(self._clients)
-    
-        
-    def _acceptConnections(self):
-        while True:
-            if not self._serverIsFull():
-                connectionSocket, addr = self._serverSocket.accept()
-                new_client = Client("Client{}".format(len(self._clients)+1), connectionSocket, addr, self.ROOM1)
-                self._clients.append(new_client)
-                self._clients[-1].send_to_client('1;{}'.format(new_client.get_name()))
-            else:
-                connectionSocket, addr = self._serverSocket.accept()
-                connectionSocket.send("error;Server is full".decode("UTF-8"))
-                connectionSocket.close()
+            client_socket.close()
+            remove_client(client_socket)
 
+def send_private_message(sender_socket, recipient, message):
+    for client_socket, username in clients.items():
+        if username == recipient:
+            try:
+                client_socket.send(f"{clients[sender_socket]}: {message}".encode())
+                print(f"{clients[sender_socket]} to {username}: {message}")
+            except:
+                client_socket.close()
+                remove_client(client_socket)
+            return
+    save_offline_message(clients[sender_socket], recipient, message)
 
+def save_offline_message(sender, recipient, message):
+    if recipient not in messages:
+        messages[recipient] = []
+    timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
+    formatted_message = f"{sender}: {message.strip()} ({timestamp})"
+    messages[recipient].append(formatted_message)
+    save_messages()
+    print(f"Saved offline message from {sender} to {recipient}: {message.strip()}")
+
+def handle_client(client_socket):
+    while True:
+        try:
+            message = client_socket.recv(1024).decode()
+            if message:
+                if message.startswith("REGISTER:"):
+                    username, password = message.split(":")[1:]
+                    if username in users:
+                        client_socket.send("ERROR:Username already taken".encode())
+                        print(f"Registration failed for {username}: Username already taken")
+                    else:
+                        users[username] = hashlib.sha256(password.encode()).hexdigest()
+                        save_users()
+                        client_socket.send("REGISTER_SUCCESS".encode())
+                        print(f"User registered: {username}")
+                elif message.startswith("LOGIN:"):
+                    username, password = message.split(":")[1:]
+                    if username in users and users[username] == hashlib.sha256(password.encode()).hexdigest():
+                        clients[client_socket] = username
+                        client_socket.send("LOGIN_SUCCESS".encode())
+                        print(f"User logged in: {username}")
+                        broadcast_user_list()
+                        if username in messages:
+                            for msg in messages[username]:
+                                client_socket.send(msg.encode())
+                            del messages[username]
+                            save_messages()
+                    else:
+                        client_socket.send("ERROR:Invalid username or password".encode())
+                        print(f"Login failed for {username}: Invalid username or password")
+                elif message.startswith("RESET:"):
+                    username, password = message.split(":")[1:]
+                    if username in users:
+                        users[username] = hashlib.sha256(password.encode()).hexdigest()
+                        save_users()
+                        client_socket.send("RESET_SUCCESS".encode())
+                        print(f"Password reset for user: {username}")
+                    else:
+                        client_socket.send("ERROR:Username not found".encode())
+                        print(f"Password reset failed for {username}: Username not found")
+                else:
+                    recipient, msg = message.split(":", 1)
+                    send_private_message(client_socket, recipient, msg)
+        except Exception as e:
+            print(f"Error handling client {clients.get(client_socket, 'unknown')}: {e}")
+            remove_client(client_socket)
+            break
+
+def remove_client(client_socket):
+    if client_socket in clients:
+        print(f"User disconnected: {clients[client_socket]}")
+        client_socket.close()
+        del clients[client_socket]
+        broadcast_user_list()
+
+def accept_connections(server_socket):
+    while True:
+        client_socket, client_address = server_socket.accept()
+        print(f"Connection from {client_address}")
+        threading.Thread(target=handle_client, args=(client_socket,)).start()
+
+def start_server():
+    load_users()
+    load_messages()
+    server_socket = socket(AF_INET, SOCK_STREAM)
+    server_socket.bind(('', 5001))
+    server_socket.listen(10)
+    print("Server started on port 5001")
+    accept_connections(server_socket)
 
 if __name__ == "__main__":
-    maxClients = 3
-    serverPort = 5000
-    server = MultiChatServer(maxClients, serverPort)
-    server.start()
-    atexit.register(server.end)
+    start_server()
